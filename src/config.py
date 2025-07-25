@@ -1,0 +1,164 @@
+"""Configuration management for the trading bot."""
+
+import os
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+from decimal import Decimal
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # Load from .env file (standard convention)
+except ImportError:
+    pass  # dotenv not available, use environment variables directly
+
+
+@dataclass
+class Config:
+    """Configuration class for the trading bot."""
+    
+    # API Keys
+    openai_api_key: str = ""
+    
+    # Binance API Keys - Separate for Live and Testnet
+    binance_live_api_key: str = ""
+    binance_live_secret_key: str = ""
+    binance_testnet_api_key: str = ""
+    binance_testnet_secret_key: str = ""
+    
+    # CoinGecko API Key
+    coingecko_api_key: str = ""  # Optional, free tier available
+    
+    # Trading Configuration
+    trading_interval: int = 300  # 5 minutes between cycles
+    max_portfolio_risk: Decimal = Decimal("0.20")  # 20% max risk per trade for demo
+    stop_loss_percentage: Decimal = Decimal("0.05")  # 5% stop loss
+    take_profit_percentage: Decimal = Decimal("0.10")  # 10% take profit
+    max_trades_per_day: int = 10
+    min_trade_amount: Decimal = Decimal("10.0")  # Minimum trade in USDT
+    max_trade_amount: Decimal = Decimal("100.0")  # Maximum trade in USDT
+    
+    # Supported cryptocurrencies
+    supported_symbols: List[str] = None
+    base_currency: str = "USDT"
+    
+    # Risk Management
+    max_open_positions: int = 3
+    portfolio_rebalance_threshold: Decimal = Decimal("0.20")  # 20%
+    emergency_stop_loss: Decimal = Decimal("0.15")  # 15% portfolio loss
+    
+    # AI Configuration
+    ai_model: str = "gpt-4"
+    ai_temperature: float = 0.3
+    max_ai_retries: int = 3
+    ai_timeout: int = 30
+    
+    # Exchange Configuration
+    use_sandbox: bool = True  # Start with sandbox/testnet
+    exchange: str = "binance"  # Currently supports binance
+    
+    # Logging
+    log_level: str = "INFO"
+    log_file: str = "trading_bot.log"
+    
+    # Computed properties for backward compatibility and convenience
+    @property
+    def binance_api_key(self) -> str:
+        """Get the appropriate Binance API key based on sandbox mode."""
+        if self.use_sandbox:
+            return self.binance_testnet_api_key
+        else:
+            return self.binance_live_api_key
+    
+    @property
+    def binance_secret_key(self) -> str:
+        """Get the appropriate Binance secret key based on sandbox mode."""
+        if self.use_sandbox:
+            return self.binance_testnet_secret_key
+        else:
+            return self.binance_live_secret_key
+    
+    def __post_init__(self):
+        """Initialize configuration from environment variables."""
+        self._load_from_env()
+        self._validate_config()
+        
+        if self.supported_symbols is None:
+            self.supported_symbols = [
+                "BTCUSDT", "ETHUSDT", "ADAUSDT", "DOTUSDT", 
+                "LINKUSDT", "SOLUSDT", "MATICUSDT", "AVAXUSDT"
+            ]
+    
+    def _load_from_env(self):
+        """Load configuration from environment variables."""
+        # API Keys
+        self.openai_api_key = os.getenv("OPENAI_API_KEY", self.openai_api_key)
+        
+        # Binance API Keys
+        self.binance_live_api_key = os.getenv("BINANCE_LIVE_API_KEY", self.binance_live_api_key)
+        self.binance_live_secret_key = os.getenv("BINANCE_LIVE_SECRET_KEY", self.binance_live_secret_key)
+        self.binance_testnet_api_key = os.getenv("BINANCE_TESTNET_API_KEY", self.binance_testnet_api_key)
+        self.binance_testnet_secret_key = os.getenv("BINANCE_TESTNET_SECRET_KEY", self.binance_testnet_secret_key)
+        
+        # CoinGecko API Key
+        self.coingecko_api_key = os.getenv("COINGECKO_API_KEY", self.coingecko_api_key)
+        
+        # Backward compatibility: if old env vars are set and new ones aren't, use old ones
+        if not self.binance_testnet_api_key and os.getenv("BINANCE_API_KEY"):
+            self.binance_testnet_api_key = os.getenv("BINANCE_API_KEY")
+            self.binance_testnet_secret_key = os.getenv("BINANCE_SECRET_KEY", "")
+        
+        # Trading Configuration
+        self.trading_interval = int(os.getenv("TRADING_INTERVAL", self.trading_interval))
+        self.max_portfolio_risk = Decimal(os.getenv("MAX_PORTFOLIO_RISK", str(self.max_portfolio_risk)))
+        self.stop_loss_percentage = Decimal(os.getenv("STOP_LOSS_PERCENTAGE", str(self.stop_loss_percentage)))
+        self.take_profit_percentage = Decimal(os.getenv("TAKE_PROFIT_PERCENTAGE", str(self.take_profit_percentage)))
+        self.max_trades_per_day = int(os.getenv("MAX_TRADES_PER_DAY", self.max_trades_per_day))
+        self.min_trade_amount = Decimal(os.getenv("MIN_TRADE_AMOUNT", str(self.min_trade_amount)))
+        self.max_trade_amount = Decimal(os.getenv("MAX_TRADE_AMOUNT", str(self.max_trade_amount)))
+        
+        # Risk Management
+        self.max_open_positions = int(os.getenv("MAX_OPEN_POSITIONS", self.max_open_positions))
+        self.emergency_stop_loss = Decimal(os.getenv("EMERGENCY_STOP_LOSS", str(self.emergency_stop_loss)))
+        
+        # AI Configuration
+        self.ai_model = os.getenv("AI_MODEL", self.ai_model)
+        self.ai_temperature = float(os.getenv("AI_TEMPERATURE", self.ai_temperature))
+        
+        # Exchange Configuration
+        self.use_sandbox = os.getenv("USE_SANDBOX", "true").lower() == "true"
+        self.exchange = os.getenv("EXCHANGE", self.exchange)
+        
+        # Logging
+        self.log_level = os.getenv("LOG_LEVEL", self.log_level)
+        self.log_file = os.getenv("LOG_FILE", self.log_file)
+    
+    def _validate_config(self):
+        """Validate configuration values."""
+        if not self.openai_api_key:
+            raise ValueError("OpenAI API key is required")
+        
+        # Validate Binance API keys based on mode
+        if self.use_sandbox:
+            if not self.binance_testnet_api_key or not self.binance_testnet_secret_key:
+                print("⚠️  Warning: Binance testnet API credentials not configured - will use demo mode")
+        else:
+            if not self.binance_live_api_key or not self.binance_live_secret_key:
+                raise ValueError("Binance live API credentials required for live trading")
+        
+        if self.max_portfolio_risk <= 0 or self.max_portfolio_risk > Decimal("0.1"):
+            raise ValueError("Max portfolio risk must be between 0 and 10%")
+        
+        if self.stop_loss_percentage <= 0 or self.stop_loss_percentage > Decimal("0.2"):
+            raise ValueError("Stop loss percentage must be between 0 and 20%")
+        
+        if self.min_trade_amount >= self.max_trade_amount:
+            raise ValueError("Min trade amount must be less than max trade amount")
+    
+    def get_symbol_config(self, symbol: str) -> Dict:
+        """Get configuration specific to a trading symbol."""
+        return {
+            "min_trade_amount": self.min_trade_amount,
+            "max_trade_amount": self.max_trade_amount,
+            "stop_loss": self.stop_loss_percentage,
+            "take_profit": self.take_profit_percentage
+        } 
