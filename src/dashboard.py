@@ -56,33 +56,77 @@ class TradingDashboard:
         async def get_bot_status():
             """Get current bot status from exchange/live data."""
             try:
-                # Get portfolio value from exchange if available
-                portfolio_value = 0
+                # Initialize default values
+                portfolio_value = self.performance_tracker.initial_balance
                 last_activity = "No recent activity"
+                system_status = "offline"
                 
+                # Check for recent AI decisions as activity indicator
+                ai_decision_time = None
+                try:
+                    with open('logs/ai_decisions.json', 'r') as f:
+                        lines = f.readlines()
+                        if lines:
+                            # Get the most recent decision
+                            last_decision = json.loads(lines[-1].strip())
+                            ai_decision_time = datetime.fromisoformat(last_decision['timestamp'])
+                            
+                            # Consider system active if AI decision was made within last 2 hours
+                            if (datetime.now() - ai_decision_time).total_seconds() < 7200:
+                                system_status = "monitoring"
+                                last_activity = f"AI decision at {last_decision['timestamp'][:19]}"
+                            else:
+                                last_activity = f"Last AI decision: {last_decision['timestamp'][:19]}"
+                except FileNotFoundError:
+                    pass
+                
+                # Try to get live data if bot is connected
                 if self.bot and hasattr(self.bot, 'exchange'):
                     try:
                         portfolio_data = await self.bot.exchange.get_portfolio_value()
-                        portfolio_value = portfolio_data.get('total_value', 0)
+                        portfolio_value = portfolio_data.get('total_value', portfolio_value)
                         
-                        # Check for recent trades as activity indicator
+                        # Check for recent trades
                         recent_trades = await self.bot.exchange.get_historical_trades(limit=1)
                         if recent_trades:
                             last_trade_time = datetime.fromisoformat(recent_trades[0].get('timestamp', datetime.now().isoformat()))
                             if (datetime.now() - last_trade_time).total_seconds() < 3600:  # Within 1 hour
-                                last_activity = recent_trades[0]['timestamp']
+                                last_activity = f"Recent trade: {recent_trades[0]['timestamp'][:19]}"
+                                system_status = "active"
+                        
+                        # Check if bot is actually running
+                        if hasattr(self.bot, 'is_running') and self.bot.is_running:
+                            system_status = "running"
+                            
                     except Exception as e:
                         self.logger.logger.warning(f"Could not get live portfolio data: {e}")
                 
-                # Check if bot instance is running
-                is_running = self.bot is not None and hasattr(self.bot, 'is_running') and self.bot.is_running
+                # Use performance tracker data if available (but don't override newer AI decisions)
+                if self.performance_tracker.portfolio_snapshots:
+                    latest_snapshot = self.performance_tracker.portfolio_snapshots[-1]
+                    portfolio_value = latest_snapshot.total_value
+                    snapshot_time = latest_snapshot.timestamp
+                    
+                    # Only use portfolio update as activity if it's more recent than AI decision
+                    use_portfolio_activity = False
+                    if (datetime.now() - snapshot_time).total_seconds() < 1800:  # Within 30 minutes
+                        if ai_decision_time is None or snapshot_time > ai_decision_time:
+                            last_activity = f"Portfolio update: {snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                            use_portfolio_activity = True
+                        
+                        if system_status == "offline":
+                            system_status = "monitoring"
+                
+                # Determine final running status
+                is_running = system_status in ["running", "active"]
                 
                 status = {
                     "is_running": is_running,
+                    "system_status": system_status,
                     "last_activity": last_activity,
                     "mode": "testnet" if self.config.use_sandbox else "live",
                     "portfolio_value": portfolio_value,
-                    "data_source": "binance_api" if self.bot else "standalone"
+                    "data_source": "binance_api" if self.bot else "monitoring"
                 }
                 
                 return {"success": True, "data": status}
@@ -93,44 +137,50 @@ class TradingDashboard:
         
         @self.app.get("/api/portfolio")
         async def get_portfolio():
-            """Get current portfolio from database."""
+            """Get current portfolio from Binance API and performance tracker."""
             try:
-                # Get latest portfolio snapshot from database
-                snapshots = self.db.get_portfolio_snapshots(limit=1) if hasattr(self.db, 'get_portfolio_snapshots') else []
+                portfolio_data = {
+                    "timestamp": datetime.now().isoformat(),
+                    "total_value": self.performance_tracker.initial_balance,
+                    "available_balance": self.performance_tracker.initial_balance,
+                    "positions": {},
+                    "unrealized_pnl": 0.0
+                }
                 
-                if snapshots:
-                    latest = snapshots[0]
-                    portfolio_data = {
-                        "timestamp": latest['timestamp'],
-                        "total_value": latest['total_value'],
-                        "available_balance": latest['available_balance'],
-                        "positions": json.loads(latest['positions']) if isinstance(latest['positions'], str) else latest['positions'],
-                        "unrealized_pnl": latest.get('unrealized_pnl', 0.0)
-                    }
-                else:
-                    # Fallback: try to read from JSON files
+                # Try to get live portfolio data from exchange
+                if self.bot and hasattr(self.bot, 'exchange'):
+                    try:
+                        live_portfolio = await self.bot.exchange.get_portfolio_value()
+                        portfolio_data.update({
+                            "total_value": live_portfolio.get('total_value', self.performance_tracker.initial_balance),
+                            "available_balance": live_portfolio.get('available_balance', self.performance_tracker.initial_balance),
+                            "positions": live_portfolio.get('positions', {}),
+                            "unrealized_pnl": live_portfolio.get('total_value', self.performance_tracker.initial_balance) - self.performance_tracker.initial_balance
+                        })
+                    except Exception as e:
+                        self.logger.logger.warning(f"Could not get live portfolio: {e}")
+                
+                # Use performance tracker snapshots if available
+                if self.performance_tracker.portfolio_snapshots:
+                    latest_snapshot = self.performance_tracker.portfolio_snapshots[-1]
+                    portfolio_data.update({
+                        "timestamp": latest_snapshot.timestamp.isoformat(),
+                        "total_value": latest_snapshot.total_value,
+                        "available_balance": latest_snapshot.available_balance,
+                        "positions": latest_snapshot.positions,
+                        "unrealized_pnl": latest_snapshot.unrealized_pnl
+                    })
+                
+                # Fallback to JSON file if no other data available
+                if portfolio_data["total_value"] == self.performance_tracker.initial_balance and not portfolio_data["positions"]:
                     try:
                         with open('logs/performance_snapshots.json', 'r') as f:
                             lines = f.readlines()
                             if lines:
                                 latest = json.loads(lines[-1])
-                                portfolio_data = latest
-                            else:
-                                portfolio_data = {
-                                    "timestamp": datetime.now().isoformat(),
-                                    "total_value": 0,
-                                    "available_balance": 0,
-                                    "positions": {},
-                                    "unrealized_pnl": 0.0
-                                }
+                                portfolio_data.update(latest)
                     except FileNotFoundError:
-                        portfolio_data = {
-                            "timestamp": datetime.now().isoformat(),
-                            "total_value": 0,
-                            "available_balance": 0,
-                            "positions": {},
-                            "unrealized_pnl": 0.0
-                        }
+                        pass  # Use default values
                 
                 return {"success": True, "data": portfolio_data}
                 
@@ -208,6 +258,90 @@ class TradingDashboard:
                 
             except Exception as e:
                 self.logger.log_error("get_performance", e)
+                return {"success": False, "error": str(e)}
+        
+        @self.app.get("/api/ai-decisions")
+        async def get_ai_decisions(limit: int = 20):
+            """Get recent AI decisions from stored file."""
+            try:
+                decisions = []
+                
+                # First, try to load from AI decisions file
+                try:
+                    with open('logs/ai_decisions.json', 'r') as f:
+                        lines = f.readlines()
+                        for line in lines[-limit:]:  # Get last N decisions
+                            if line.strip():
+                                decision_data = json.loads(line.strip())
+                                decision = decision_data.get('decision', {})
+                                
+                                decisions.append({
+                                    "action": decision.get('action', 'HOLD'),
+                                    "symbol": decision.get('symbol', 'N/A'),
+                                    "confidence": decision.get('confidence', 0),
+                                    "timestamp": decision_data.get('timestamp', datetime.now().isoformat()),
+                                    "reasoning": decision.get('reasoning', 'No reasoning provided')[:200] + "..." if len(decision.get('reasoning', '')) > 200 else decision.get('reasoning', 'No reasoning provided'),
+                                    "allocation_percentage": decision.get('allocation_percentage', 0),
+                                    "source": "ai_gpt4"
+                                })
+                                
+                except FileNotFoundError:
+                    # If no AI decisions file exists, fall back to other data sources
+                    pass
+                
+                # If we don't have AI decisions, try to get recent market insights
+                if not decisions:
+                    if self.bot and hasattr(self.bot, 'exchange'):
+                        # Get recent trades as backup
+                        recent_trades = await self.bot.exchange.get_historical_trades(limit=min(limit, 5))
+                        
+                        for trade in recent_trades[-limit:]:
+                            decisions.append({
+                                "action": "BUY" if trade.get('isBuyer', True) else "SELL",
+                                "symbol": trade.get('symbol', ''),
+                                "confidence": 8,
+                                "timestamp": trade.get('timestamp', datetime.now().isoformat()),
+                                "reasoning": f"Market trade executed at ${trade.get('price', 0):.4f}",
+                                "allocation_percentage": 0,
+                                "source": "binance_trades"
+                            })
+                        
+                        # Add market insights if still no trades
+                        if not decisions:
+                            try:
+                                stats = await self.bot.exchange.get_24hr_ticker_stats()
+                                for symbol, data in list(stats.items())[:min(limit, 5)]:
+                                    change_pct = data.get('priceChangePercent', 0)
+                                    action = "BUY" if change_pct > 0 else "SELL" if change_pct < -2 else "HOLD"
+                                    
+                                    decisions.append({
+                                        "action": action,
+                                        "symbol": symbol,
+                                        "confidence": min(9, max(1, int(5 + abs(change_pct) / 2))),
+                                        "timestamp": datetime.now().isoformat(),
+                                        "reasoning": f"24h change: {change_pct:.2f}%",
+                                        "allocation_percentage": 0,
+                                        "source": "market_analysis"
+                                    })
+                            except Exception:
+                                pass
+                    else:
+                        # Final fallback to performance tracker trades
+                        for trade in self.performance_tracker.trades[-limit:]:
+                            decisions.append({
+                                "action": trade.action,
+                                "symbol": trade.symbol,
+                                "confidence": 7,
+                                "timestamp": trade.timestamp.isoformat(),
+                                "reasoning": f"Trade executed at ${trade.price:.4f}",
+                                "allocation_percentage": 0,
+                                "source": "performance_tracker"
+                            })
+                
+                return {"success": True, "data": decisions}
+                
+            except Exception as e:
+                self.logger.log_error("get_ai_decisions", e)
                 return {"success": False, "error": str(e)}
         
         @self.app.get("/api/market-analysis")

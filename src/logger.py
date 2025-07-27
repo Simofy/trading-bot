@@ -90,8 +90,35 @@ class TradingLogger:
         self.trade_logger.info(f"{trade_info}")
     
     def log_ai_decision(self, prompt: str, response: str, decision: dict):
-        """Log AI trading decisions."""
+        """Log AI trading decisions to both log file and dedicated JSON file."""
         self.logger.info(f"AI Decision - Prompt length: {len(prompt)}, Response: {response[:200]}..., Decision: {decision}")
+        
+        # Also save to dedicated AI decisions file
+        self._save_ai_decision_to_file(prompt, response, decision)
+    
+    def _save_ai_decision_to_file(self, prompt: str, response: str, decision: dict):
+        """Save AI decision to dedicated JSON file for dashboard and analysis."""
+        try:
+            from datetime import datetime
+            import json
+            
+            ai_decision_data = {
+                "timestamp": datetime.now().isoformat(),
+                "prompt_length": len(prompt),
+                "response_preview": response[:500] if response else "",  # Save more of the response
+                "decision": decision,
+                "market_context": {
+                    "prompt_summary": prompt[:200] + "..." if len(prompt) > 200 else prompt
+                }
+            }
+            
+            # Append to AI decisions file
+            with open("logs/ai_decisions.json", "a") as f:
+                f.write(json.dumps(ai_decision_data) + "\n")
+                
+        except Exception as e:
+            # Don't let file logging errors break the main flow
+            self.logger.warning(f"Could not save AI decision to file: {e}")
     
     def log_portfolio_update(self, portfolio_value: float, pnl: float, positions: dict):
         """Log portfolio status updates."""
