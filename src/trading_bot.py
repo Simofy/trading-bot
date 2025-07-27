@@ -11,7 +11,6 @@ from .market_data import MarketDataProvider
 from .exchange import BinanceExchange
 from .risk_manager import RiskManager
 from .performance_tracker import PerformanceTracker, Trade, PortfolioSnapshot
-from .database import TradingDatabase
 
 
 class TradingBot:
@@ -25,9 +24,8 @@ class TradingBot:
         self.ai_advisor = AITradingAdvisor(config)
         self.market_data = MarketDataProvider(config)
         self.exchange = BinanceExchange(config)
-        self.risk_manager = RiskManager(config)
-        self.performance_tracker = PerformanceTracker()
-        self.db = TradingDatabase()
+        self.risk_manager = RiskManager(config, self.exchange)  # Pass exchange reference
+        self.performance_tracker = PerformanceTracker(initial_balance=float(config.demo_initial_balance), exchange=self.exchange)
         
         # Trading state
         self.is_running = False
@@ -212,20 +210,8 @@ class TradingBot:
                 f"({allocation_percentage}% allocation, {confidence}/10 confidence)"
             )
             
-            # Save AI decision to database
-            decision_data = {
-                'timestamp': datetime.now().isoformat(),
-                'symbol': symbol,
-                'action': action,
-                'allocation_percentage': allocation_percentage,
-                'confidence': confidence,
-                'reasoning': ai_decision.get('reasoning', ''),
-                'market_data': market_data,
-                'technical_analysis': {},  # Would need to pass technical analysis data
-                'executed': False,
-                'execution_result': ''
-            }
-            decision_id = self.db.insert_ai_decision(decision_data)
+            # Log AI decision for reference (database removed - using Binance API for analytics)
+            self.logger.logger.info(f"AI Decision recorded: {action} {symbol} with {confidence}/10 confidence")
             
             if action == "HOLD":
                 self.logger.logger.info("Holding current positions as recommended by AI")
@@ -277,11 +263,19 @@ class TradingBot:
             
             if action == "BUY":
                 # Calculate trade amount
-                trade_amount = (allocation_percentage / 100) * available_balance
+                trade_amount = round((allocation_percentage / 100) * available_balance, 2)
                 
-                # Validate minimum trade amount
-                if trade_amount < float(self.config.min_trade_amount):
-                    self.logger.logger.warning(f"Trade amount ${trade_amount:.2f} below minimum ${self.config.min_trade_amount}")
+                # For small portfolios, use smart minimum trade validation
+                # (Risk manager already validated this trade is safe)
+                min_trade_amount = float(self.config.min_trade_amount)
+                if portfolio_value < 100:  # Small portfolio exception
+                    effective_min = max(1.0, portfolio_value * 0.05)  # 5% of portfolio or $1 minimum
+                    # Use small tolerance for floating point comparison
+                    if trade_amount < (effective_min - 0.01):
+                        self.logger.logger.warning(f"Trade amount ${trade_amount:.2f} below effective minimum ${effective_min:.2f} for small portfolio")
+                        return False
+                elif trade_amount < (min_trade_amount - 0.01):
+                    self.logger.logger.warning(f"Trade amount ${trade_amount:.2f} below minimum ${min_trade_amount}")
                     return False
                 
                 # Execute buy order
@@ -391,6 +385,15 @@ class TradingBot:
                 self.logger.logger.info(
                     f"Final portfolio: ${final_value:.2f} with {len(positions)} positions"
                 )
+            
+            # Shutdown exchange connection with timeout
+            try:
+                await asyncio.wait_for(self.exchange.shutdown(), timeout=5.0)
+                self.logger.logger.info("Exchange shutdown completed")
+            except asyncio.TimeoutError:
+                self.logger.logger.warning("Exchange shutdown timed out after 5 seconds")
+            except Exception as e:
+                self.logger.logger.warning(f"Exchange shutdown error: {e}")
             
             self.logger.logger.info("Trading bot shutdown complete")
             

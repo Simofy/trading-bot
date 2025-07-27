@@ -11,7 +11,6 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-from .database import TradingDatabase
 from .config import Config
 from .logger import TradingLogger
 from .market_data import MarketDataProvider
@@ -24,12 +23,11 @@ class TradingDashboard:
     def __init__(self, bot: 'TradingBot' = None):
         self.app = FastAPI(title="AI Trading Bot Dashboard", version="1.0.0")
         self.logger = TradingLogger(__name__)
-        self.db = TradingDatabase()
         self.config = Config()
         
         # Independent components (don't require bot instance)
         self.market_data = MarketDataProvider(config=self.config)
-        self.performance_tracker = PerformanceTracker(initial_balance=10000.0)
+        self.performance_tracker = PerformanceTracker(initial_balance=float(self.config.demo_initial_balance), exchange=bot.exchange if bot else None)
         
         # Optional bot instance for advanced features
         self.bot = bot
@@ -56,32 +54,35 @@ class TradingDashboard:
         
         @self.app.get("/api/status")
         async def get_bot_status():
-            """Get current bot status from database/files."""
+            """Get current bot status from exchange/live data."""
             try:
-                # Read status from database - check recent activity
-                recent_trades = self.db.get_recent_trades(1) if hasattr(self.db, 'get_recent_trades') else []
-                recent_decisions = self.db.get_ai_decisions(limit=1)
+                # Get portfolio value from exchange if available
+                portfolio_value = 0
+                last_activity = "No recent activity"
                 
-                # Check if bot is recently active (within last hour)
-                is_active = False
-                last_activity = None
+                if self.bot and hasattr(self.bot, 'exchange'):
+                    try:
+                        portfolio_data = await self.bot.exchange.get_portfolio_value()
+                        portfolio_value = portfolio_data.get('total_value', 0)
+                        
+                        # Check for recent trades as activity indicator
+                        recent_trades = await self.bot.exchange.get_historical_trades(limit=1)
+                        if recent_trades:
+                            last_trade_time = datetime.fromisoformat(recent_trades[0].get('timestamp', datetime.now().isoformat()))
+                            if (datetime.now() - last_trade_time).total_seconds() < 3600:  # Within 1 hour
+                                last_activity = recent_trades[0]['timestamp']
+                    except Exception as e:
+                        self.logger.logger.warning(f"Could not get live portfolio data: {e}")
                 
-                if recent_decisions:
-                    last_decision_time = datetime.fromisoformat(recent_decisions[0]['timestamp'])
-                    if (datetime.now() - last_decision_time).total_seconds() < 3600:  # 1 hour
-                        is_active = True
-                        last_activity = recent_decisions[0]['timestamp']
-                
-                # Get portfolio from database
-                portfolio_snapshots = self.db.get_portfolio_snapshots(limit=1) if hasattr(self.db, 'get_portfolio_snapshots') else []
+                # Check if bot instance is running
+                is_running = self.bot is not None and hasattr(self.bot, 'is_running') and self.bot.is_running
                 
                 status = {
-                    "is_running": is_active,
-                    "last_activity": last_activity or "No recent activity",
+                    "is_running": is_running,
+                    "last_activity": last_activity,
                     "mode": "testnet" if self.config.use_sandbox else "live",
-                    "total_decisions": len(self.db.get_ai_decisions(limit=1000)) if hasattr(self.db, 'get_ai_decisions') else 0,
-                    "portfolio_value": portfolio_snapshots[0]['total_value'] if portfolio_snapshots else 0,
-                    "data_source": "database" if not self.bot else "live_bot"
+                    "portfolio_value": portfolio_value,
+                    "data_source": "binance_api" if self.bot else "standalone"
                 }
                 
                 return {"success": True, "data": status}
@@ -139,9 +140,26 @@ class TradingDashboard:
 
         @self.app.get("/api/trades")
         async def get_trades(limit: int = 20):
-            """Get trade history from database."""
+            """Get trade history from Binance API."""
             try:
-                trades = self.db.get_recent_trades(limit) if hasattr(self.db, 'get_recent_trades') else []
+                if self.bot and hasattr(self.bot, 'exchange'):
+                    trades = await self.bot.exchange.get_historical_trades(limit=limit)
+                else:
+                    # Fallback to performance tracker trades
+                    trades = [
+                        {
+                            'symbol': trade.symbol,
+                            'action': trade.action,
+                            'quantity': trade.quantity,
+                            'price': trade.price,
+                            'amount': trade.amount,
+                            'fees': trade.fees,
+                            'timestamp': trade.timestamp.isoformat(),
+                            'success': trade.success
+                        }
+                        for trade in self.performance_tracker.trades[-limit:]
+                    ]
+                
                 return {"success": True, "data": trades}
             except Exception as e:
                 self.logger.log_error("get_trades", e)
@@ -149,13 +167,23 @@ class TradingDashboard:
         
         @self.app.get("/api/performance")
         async def get_performance():
-            """Get performance metrics from database."""
+            """Get performance metrics from Binance API and performance tracker."""
             try:
-                # Get performance metrics using independent performance tracker
+                # Get performance metrics using performance tracker with Binance data
                 metrics = self.performance_tracker.get_performance_metrics()
                 
-                # Also get trading statistics from database
-                db_stats = self.db.get_trading_statistics() if hasattr(self.db, 'get_trading_statistics') else {}
+                # Get additional stats from Binance API if available
+                api_stats = {}
+                if self.bot and hasattr(self.bot, 'exchange'):
+                    try:
+                        # Get 24hr ticker stats for additional context
+                        ticker_stats = await self.bot.exchange.get_24hr_ticker_stats()
+                        api_stats = {
+                            "market_data": ticker_stats,
+                            "data_source": "binance_api"
+                        }
+                    except Exception as e:
+                        self.logger.logger.warning(f"Could not get market stats: {e}")
                 
                 performance_data = {
                     "metrics": {
@@ -172,7 +200,7 @@ class TradingDashboard:
                         "volatility": metrics.volatility,
                         "profit_factor": metrics.profit_factor
                     },
-                    "database_stats": db_stats,
+                    "api_stats": api_stats,
                     "report": self.performance_tracker.generate_performance_report()
                 }
                 
@@ -182,41 +210,80 @@ class TradingDashboard:
                 self.logger.log_error("get_performance", e)
                 return {"success": False, "error": str(e)}
         
-        @self.app.get("/api/ai-decisions")
-        async def get_ai_decisions(limit: int = 20):
-            """Get AI decision history."""
+        @self.app.get("/api/market-analysis")
+        async def get_market_analysis(symbol: str = "BTCUSDT"):
+            """Get market analysis data from Binance API."""
             try:
-                decisions = self.db.get_ai_decisions(limit=limit)
-                return {"success": True, "data": decisions}
+                if self.bot and hasattr(self.bot, 'exchange'):
+                    # Get kline data for technical analysis
+                    klines = await self.bot.exchange.get_klines(symbol=symbol, interval="1h", limit=100)
+                    ticker_stats = await self.bot.exchange.get_24hr_ticker_stats(symbol=symbol)
+                    
+                    analysis = {
+                        "symbol": symbol,
+                        "price_data": klines[-50:] if klines else [],  # Last 50 hours
+                        "ticker_stats": ticker_stats,
+                        "data_source": "binance_api"
+                    }
+                else:
+                    analysis = {"error": "No live bot connection available"}
+                
+                return {"success": True, "data": analysis}
             except Exception as e:
-                self.logger.log_error("get_ai_decisions", e)
+                self.logger.log_error("get_market_analysis", e)
                 return {"success": False, "error": str(e)}
         
         @self.app.get("/api/portfolio-history")
         async def get_portfolio_history(days: int = 7):
-            """Get portfolio value history."""
+            """Get portfolio value history from performance tracker and Binance API."""
             try:
-                # Get from database first
-                snapshots = self.db.get_portfolio_snapshots(limit=days*24) if hasattr(self.db, 'get_portfolio_snapshots') else []
-                
-                if not snapshots:
-                    # Fallback to JSON file
-                    try:
-                        with open('logs/performance_snapshots.json', 'r') as f:
-                            snapshots = [json.loads(line) for line in f if line.strip()]
-                    except FileNotFoundError:
-                        snapshots = []
-                
-                # Format for charting
                 history = []
-                for snapshot in snapshots[-days*24:]:  # Last N days
-                    if isinstance(snapshot, dict):
-                        history.append({
-                            "timestamp": snapshot['timestamp'],
-                            "value": snapshot.get('total_value', 0)
-                        })
                 
-                return {"success": True, "data": history}
+                # Get from performance tracker snapshots
+                snapshots = self.performance_tracker.portfolio_snapshots
+                
+                if snapshots:
+                    # Use existing snapshots
+                    for snapshot in snapshots[-days*24:]:  # Last N days worth
+                        history.append({
+                            "timestamp": snapshot.timestamp.isoformat(),
+                            "value": snapshot.total_value
+                        })
+                else:
+                    # If no snapshots, try to get current portfolio value from exchange
+                    if self.bot and hasattr(self.bot, 'exchange'):
+                        try:
+                            portfolio_data = await self.bot.exchange.get_portfolio_value()
+                            current_value = portfolio_data.get('total_value', self.performance_tracker.initial_balance)
+                            
+                            # Create a single current data point
+                            history.append({
+                                "timestamp": datetime.now().isoformat(),
+                                "value": current_value
+                            })
+                        except Exception as e:
+                            self.logger.logger.warning(f"Could not get current portfolio value: {e}")
+                            # Fallback to initial balance
+                            history.append({
+                                "timestamp": datetime.now().isoformat(),
+                                "value": self.performance_tracker.initial_balance
+                            })
+                    
+                    # Also try to load from JSON file as backup
+                    if not history:
+                        try:
+                            with open('logs/performance_snapshots.json', 'r') as f:
+                                for line in f:
+                                    if line.strip():
+                                        snapshot_data = json.loads(line.strip())
+                                        history.append({
+                                            "timestamp": snapshot_data['timestamp'],
+                                            "value": snapshot_data.get('total_value', 0)
+                                        })
+                        except FileNotFoundError:
+                            pass
+                
+                return {"success": True, "data": history[-days*24:] if history else []}
                 
             except Exception as e:
                 self.logger.log_error("get_portfolio_history", e)
@@ -511,24 +578,6 @@ class TradingDashboard:
                         <h3>📊 Market Data</h3>
                         <div id="market-data" class="loading">Loading...</div>
                     </div>
-                    
-                    <!-- Manual Trading -->
-                    <div class="card">
-                        <h3>⚡ Manual Trading</h3>
-                        <div>
-                            <select id="trade-symbol">
-                                <option value="BTCUSDT">BTC/USDT</option>
-                                <option value="ETHUSDT">ETH/USDT</option>
-                                <option value="ADAUSDT">ADA/USDT</option>
-                                <option value="SOLUSDT">SOL/USDT</option>
-                            </select>
-                            <input type="number" id="trade-amount" placeholder="Amount %" value="5" min="1" max="20">
-                            <button onclick="executeTrade('BUY')">🟢 BUY</button>
-                            <button onclick="executeTrade('SELL')">🔴 SELL</button>
-                        </div>
-                    </div>
-                </div>
-                
                 <button class="refresh-btn" onclick="refreshAll()" title="Refresh All Data">
                     🔄
                 </button>
@@ -574,28 +623,36 @@ class TradingDashboard:
                     const element = document.getElementById('bot-status');
                     
                     if (status) {
+                        const isRunning = status.is_running;
+                        const statusClass = isRunning ? 'status-online' : 'status-offline';
+                        const statusText = isRunning ? 'Online' : 'Offline';
+                        
                         element.innerHTML = `
                             <div class="metric">
                                 <span class="metric-label">Status</span>
                                 <span class="metric-value">
-                                    <span class="status-indicator status-online"></span>Online
+                                    <span class="status-indicator ${statusClass}"></span>${statusText}
                                 </span>
                             </div>
                             <div class="metric">
-                                <span class="metric-label">Cycle Count</span>
-                                <span class="metric-value">${status.cycle_count}</span>
+                                <span class="metric-label">Mode</span>
+                                <span class="metric-value">${status.mode || 'Unknown'}</span>
                             </div>
                             <div class="metric">
-                                <span class="metric-label">Open Positions</span>
-                                <span class="metric-value">${status.positions}</span>
+                                <span class="metric-label">Last Activity</span>
+                                <span class="metric-value">${status.last_activity ? new Date(status.last_activity).toLocaleTimeString() : 'Never'}</span>
                             </div>
                             <div class="metric">
-                                <span class="metric-label">Risk Score</span>
-                                <span class="metric-value">${status.risk_score.toFixed(1)}</span>
+                                <span class="metric-label">Total Decisions</span>
+                                <span class="metric-value">${status.total_decisions || 0}</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Data Source</span>
+                                <span class="metric-value">${status.data_source || 'Unknown'}</span>
                             </div>
                         `;
                     } else {
-                        element.innerHTML = '<div class="metric"><span class="status-indicator status-offline"></span>Bot Offline</div>';
+                        element.innerHTML = '<div class="metric"><span class="status-indicator status-offline"></span>Bot Offline - No Data</div>';
                     }
                 }
                 

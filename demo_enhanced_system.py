@@ -13,7 +13,7 @@ from src.config import Config
 from src.logger import setup_logger
 from src.performance_tracker import PerformanceTracker
 from src.technical_analysis import TechnicalAnalyzer
-from src.database import TradingDatabase
+# Database removed - using Binance API for data
 
 async def demo_enhanced_system():
     """Run comprehensive demo of all enhanced features."""
@@ -22,7 +22,7 @@ async def demo_enhanced_system():
     print("=" * 70)
     print("🧠 GPT-4 AI Decision Making with Technical Analysis")
     print("📊 Real-time Performance Tracking & Analytics") 
-    print("🗄️ SQLite Database for Persistent Storage")
+    print("🔗 Binance API for Real-time Data")
     print("🛡️ Advanced Risk Management with VaR & Stress Testing")
     print("📈 Comprehensive Technical Indicators (RSI, MACD, Bollinger Bands)")
     print("🌐 Web Dashboard for Real-time Monitoring")
@@ -47,7 +47,7 @@ async def demo_enhanced_system():
         print("   • AI Advisor with GPT-4 integration")
         print("   • Technical Analysis engine")
         print("   • Performance tracker with advanced metrics")
-        print("   • SQLite database for persistence")
+        print("   • Binance API for live analytics and data")
         print("   • Enhanced risk management")
         
         # Demonstrate technical analysis
@@ -187,7 +187,7 @@ async def demo_enhanced_system():
         print("   ✅ Secure configuration management")
         print("   ✅ Comprehensive performance tracking (Sharpe, Sortino, Calmar ratios)")
         print("   ✅ Technical analysis integration (RSI, MACD, Bollinger Bands, etc.)")
-        print("   ✅ SQLite database for persistent storage")
+        print("   ✅ Binance API integration for real-time analytics")
         print("   ✅ Real-time web dashboard with FastAPI")
         print("   ✅ Enhanced risk management with VaR and stress testing")
         print("")

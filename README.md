@@ -218,7 +218,7 @@ EMERGENCY_STOP_LOSS=0.20  # 20% portfolio stop
 ### AI Model Configuration
 
 ```bash
-AI_MODEL=gpt-4           # Most intelligent (recommended)
+AI_MODEL=gpt-4o-mini     # Most intelligent (recommended)
 AI_TEMPERATURE=0.3       # Conservative responses
 ```
 

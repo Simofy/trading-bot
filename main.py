@@ -67,31 +67,18 @@ class BotRunner:
                 cycle_count += 1
                 
                 # Run one trading cycle
-                print(f"\n🔄 === TRADING CYCLE #{cycle_count} ===")
+                self.logger.info(f"Starting trading cycle #{cycle_count}")
                 await self.bot.run_cycle()
                 
-                # Show completion and next cycle info
+                # Log completion and wait for next cycle
                 interval_minutes = self.bot.config.trading_interval // 60
-                print(f"\n✅ Cycle #{cycle_count} completed!")
-                print(f"⏰ Waiting {interval_minutes} minutes until next cycle...")
-                print(f"💡 Press Ctrl+C to stop the bot")
-                print("━" * 50)
+                self.logger.info(f"Cycle #{cycle_count} completed. Next cycle in {interval_minutes} minutes.")
                 
-                # Wait with countdown for next cycle
-                for remaining in range(self.bot.config.trading_interval, 0, -10):
-                    if not self.running:
-                        break
-                    
-                    minutes = remaining // 60
-                    seconds = remaining % 60
-                    print(f"⏳ Next cycle in: {minutes:02d}:{seconds:02d}", end="\r", flush=True)
-                    
-                    try:
-                        await asyncio.sleep(10)  # Update every 10 seconds
-                    except asyncio.CancelledError:
-                        break
-                
-                print()  # New line after countdown
+                # Wait for next cycle without countdown spam
+                try:
+                    await asyncio.sleep(self.bot.config.trading_interval)
+                except asyncio.CancelledError:
+                    break
                 
         except KeyboardInterrupt:
             self.logger.info("Received interrupt signal, shutting down...")
@@ -106,7 +93,13 @@ class BotRunner:
         """Gracefully shutdown the bot."""
         self.running = False
         if self.bot:
-            await self.bot.shutdown()
+            try:
+                # Shutdown with overall timeout to prevent hanging
+                await asyncio.wait_for(self.bot.shutdown(), timeout=10.0)
+            except asyncio.TimeoutError:
+                self.logger.warning("Bot shutdown timed out after 10 seconds")
+            except Exception as e:
+                self.logger.error(f"Error during bot shutdown: {e}")
         self.logger.info("Bot shutdown complete")
     
     def signal_handler(self, signum, frame):

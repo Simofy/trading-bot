@@ -1,5 +1,6 @@
 """Performance tracking and analytics for the trading bot."""
 
+import asyncio
 import json
 import math
 import statistics
@@ -9,7 +10,7 @@ from decimal import Decimal
 from dataclasses import dataclass, asdict
 
 from .logger import TradingLogger
-from .database import TradingDatabase
+# Database no longer used - using Binance API for data
 
 
 @dataclass
@@ -63,7 +64,7 @@ class PerformanceMetrics:
 class PerformanceTracker:
     """Tracks and analyzes trading performance with advanced metrics."""
     
-    def __init__(self, initial_balance: float = 10000.0):
+    def __init__(self, initial_balance: float = 10000.0, exchange=None):
         self.logger = TradingLogger(__name__)
         
         # Core data
@@ -80,8 +81,8 @@ class PerformanceTracker:
         # Risk-free rate (annualized) - US 10-year treasury approximation
         self.risk_free_rate = 0.04  # 4%
         
-        # Database integration
-        self.db = TradingDatabase()
+        # Exchange integration for real-time data
+        self.exchange = exchange
         
         # Load historical data if available
         self._load_historical_data()
@@ -90,21 +91,7 @@ class PerformanceTracker:
         """Record a new trade and update metrics."""
         self.trades.append(trade)
         
-        # Save to database
-        trade_data = {
-            'timestamp': trade.timestamp.isoformat(),
-            'symbol': trade.symbol,
-            'action': trade.action,
-            'quantity': trade.quantity,
-            'price': trade.price,
-            'amount': trade.amount,
-            'fees': trade.fees,
-            'order_id': trade.order_id,
-            'success': trade.success
-        }
-        self.db.insert_trade(trade_data)
-        
-        # Also save to JSON for backward compatibility
+        # Save to JSON for backup compatibility
         self._save_trade(trade)
         
         self.logger.logger.info(
@@ -128,17 +115,7 @@ class PerformanceTracker:
         # Update drawdown tracking
         self._update_drawdown(snapshot.total_value)
         
-        # Save to database
-        snapshot_data = {
-            'timestamp': snapshot.timestamp.isoformat(),
-            'total_value': snapshot.total_value,
-            'available_balance': snapshot.available_balance,
-            'positions': snapshot.positions,
-            'unrealized_pnl': snapshot.unrealized_pnl
-        }
-        self.db.insert_portfolio_snapshot(snapshot_data)
-        
-        # Also save to JSON for backward compatibility
+        # Save to JSON for backup compatibility
         self._save_snapshot(snapshot)
     
     def get_performance_metrics(self) -> PerformanceMetrics:
@@ -409,9 +386,61 @@ class PerformanceTracker:
             self.logger.log_error("_save_snapshot", e)
     
     def _load_historical_data(self):
-        """Load historical performance data."""
+        """Load historical performance data from Binance API or fallback to JSON files."""
         try:
-            # Load trades
+            # First try to load from Binance API if exchange is available
+            if self.exchange:
+                asyncio.create_task(self._load_from_binance_api())
+            
+            # Also load from JSON files as backup/supplement
+            self._load_from_json_files()
+            
+            # Recalculate metrics from loaded data
+            self._recalculate_from_snapshots()
+            
+        except Exception as e:
+            self.logger.log_error("_load_historical_data", e)
+    
+    async def _load_from_binance_api(self):
+        """Load historical data from Binance API."""
+        try:
+            if not self.exchange:
+                return
+            
+            # Load historical trades from Binance
+            historical_trades = await self.exchange.get_historical_trades(limit=200)
+            
+            for trade_data in historical_trades:
+                # Convert Binance trade to our Trade format
+                trade = Trade(
+                    timestamp=datetime.fromisoformat(trade_data.get('timestamp', datetime.now().isoformat())),
+                    symbol=trade_data.get('symbol', ''),
+                    action="BUY" if trade_data.get('isBuyer', True) else "SELL",
+                    quantity=trade_data.get('qty', 0),
+                    price=trade_data.get('price', 0),
+                    amount=trade_data.get('quoteQty', 0),
+                    fees=trade_data.get('commission', 0),
+                    order_id=str(trade_data.get('orderId', '')),
+                    success=True  # Assume all historical trades were successful
+                )
+                
+                # Avoid duplicates by checking if trade already exists
+                if not any(t.order_id == trade.order_id for t in self.trades):
+                    self.trades.append(trade)
+            
+            self.logger.logger.info(f"Loaded {len(historical_trades)} trades from Binance API")
+            
+            # Generate portfolio snapshots from trade history if none exist
+            if not self.portfolio_snapshots and self.trades:
+                await self._generate_portfolio_snapshots_from_trades()
+            
+        except Exception as e:
+            self.logger.log_error("_load_from_binance_api", e)
+    
+    def _load_from_json_files(self):
+        """Load historical data from JSON backup files."""
+        try:
+            # Load trades from JSON
             try:
                 with open("logs/performance_trades.json", "r") as f:
                     for line in f:
@@ -427,11 +456,13 @@ class PerformanceTracker:
                             order_id=trade_dict.get("order_id", ""),
                             success=trade_dict.get("success", True)
                         )
-                        self.trades.append(trade)
+                        # Avoid duplicates
+                        if not any(t.order_id == trade.order_id and t.timestamp == trade.timestamp for t in self.trades):
+                            self.trades.append(trade)
             except FileNotFoundError:
-                pass  # No historical trades yet
+                pass  # No JSON trades yet
             
-            # Load snapshots
+            # Load snapshots from JSON
             try:
                 with open("logs/performance_snapshots.json", "r") as f:
                     for line in f:
@@ -445,13 +476,38 @@ class PerformanceTracker:
                         )
                         self.portfolio_snapshots.append(snapshot)
             except FileNotFoundError:
-                pass  # No historical snapshots yet
-            
-            # Recalculate metrics from loaded data
-            self._recalculate_from_snapshots()
-            
+                pass  # No JSON snapshots yet
+                
         except Exception as e:
-            self.logger.log_error("_load_historical_data", e)
+            self.logger.log_error("_load_from_json_files", e)
+    
+    async def _generate_portfolio_snapshots_from_trades(self):
+        """Generate portfolio snapshots from trade history for analytics."""
+        try:
+            if not self.exchange or not self.trades:
+                return
+            
+            # Get current portfolio value to establish baseline
+            portfolio_data = await self.exchange.get_portfolio_value()
+            current_value = portfolio_data.get('total_value', self.initial_balance)
+            current_balance = portfolio_data.get('available_balance', self.initial_balance)
+            current_positions = portfolio_data.get('positions', {})
+            
+            # Create current snapshot
+            current_snapshot = PortfolioSnapshot(
+                timestamp=datetime.now(),
+                total_value=current_value,
+                available_balance=current_balance,
+                positions=current_positions,
+                unrealized_pnl=current_value - self.initial_balance
+            )
+            
+            # Add only if we don't already have a recent snapshot
+            if not self.portfolio_snapshots or (datetime.now() - self.portfolio_snapshots[-1].timestamp).total_seconds() > 3600:
+                self.portfolio_snapshots.append(current_snapshot)
+                
+        except Exception as e:
+            self.logger.log_error("_generate_portfolio_snapshots_from_trades", e)
     
     def _recalculate_from_snapshots(self):
         """Recalculate metrics from loaded portfolio snapshots."""

@@ -188,8 +188,8 @@ python3 demo_single_cycle.py
 
 # 3. View analytics overview
 python3 -c "
-from src.database import TradingDatabase
-db = TradingDatabase()
+# Database removed - now using Binance API for all analytics
+# Historical data is fetched directly from exchange
 stats = db.get_trading_statistics()
 print(f'Total trades: {stats[\"total_trades\"]}')
 print(f'Portfolio value: ${stats.get(\"latest_portfolio_value\", 0):,.2f}')

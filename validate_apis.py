@@ -172,6 +172,53 @@ class APIValidator:
                 
                 self.results['binance']['status'] = 'success'
                 
+            elif exchange.use_binance_live:
+                print("🚀 Connected to Binance Live API successfully!")
+                self.results['binance']['details'].append("✅ Live API connection successful")
+                
+                # Test account info
+                print("\n📊 Testing Live Account Information...")
+                account_info = await exchange.get_account_info()
+                
+                if account_info:
+                    print("✅ Live account info retrieved successfully")
+                    self.results['binance']['details'].append("✅ Live account info accessible")
+                    
+                    balances = account_info.get("balances", {})
+                    account_type = account_info.get("accountType", "UNKNOWN")
+                    
+                    print(f"   Account Type: {account_type}")
+                    print(f"   Available Assets: {len(balances)}")
+                    self.results['binance']['details'].append(f"✅ Live account type: {account_type}")
+                    
+                    # Show non-zero balances (but limit for privacy)
+                    non_zero_balances = {asset: bal for asset, bal in balances.items() 
+                                       if bal.get("free", 0) > 0}
+                    
+                    if non_zero_balances:
+                        print(f"   💰 Non-zero balances: {len(non_zero_balances)} assets")
+                        self.results['binance']['details'].append(f"✅ Found {len(non_zero_balances)} funded assets")
+                    else:
+                        print("   ⚠️  No available balances found")
+                        self.results['binance']['details'].append("⚠️ No available balances")
+                
+                # Test market data
+                print("\n📈 Testing Live Market Data...")
+                try:
+                    ticker = await exchange.get_ticker_price("BTCUSDT")
+                    if ticker and 'price' in ticker:
+                        price = float(ticker['price'])
+                        print(f"   BTC/USDT Live Price: ${price:,.2f}")
+                        self.results['binance']['details'].append("✅ Live market data retrieval working")
+                    else:
+                        print("   ❌ Failed to get live ticker price")
+                        self.results['binance']['details'].append("❌ Live market data retrieval failed")
+                except Exception as e:
+                    print(f"   ❌ Live market data error: {e}")
+                    self.results['binance']['details'].append(f"❌ Live market data error: {e}")
+                
+                self.results['binance']['status'] = 'success'
+                
             elif exchange.demo_mode:
                 print("⚠️  Running in demo mode (no real API connection)")
                 self.results['binance']['details'].append("⚠️ Demo mode - no real API connection")

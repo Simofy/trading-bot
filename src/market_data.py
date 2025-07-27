@@ -45,15 +45,15 @@ class MarketDataProvider:
     async def get_current_prices(self, symbols: List[str]) -> Dict[str, Dict]:
         """Get current prices for specified cryptocurrency symbols."""
         try:
-            # Try to get real prices from CoinGecko if possible
-            if hasattr(self.config, 'use_sandbox') and self.config.use_sandbox:
+            # Try to get real prices from CoinGecko if configured to do so
+            if hasattr(self.config, 'should_use_real_market_data') and self.config.should_use_real_market_data:
                 try:
                     return await self._get_real_prices(symbols)
                 except Exception as e:
                     self.logger.logger.warning(f"Failed to get real prices: {e}, using demo data")
                     return self._get_demo_prices(symbols)
             else:
-                # For demo mode, return simulated data directly
+                # Use simulated demo data
                 return self._get_demo_prices(symbols)
             
         except Exception as e:

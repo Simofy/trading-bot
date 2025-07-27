@@ -12,9 +12,10 @@ from .logger import TradingLogger
 class RiskManager:
     """Comprehensive risk management for cryptocurrency trading."""
     
-    def __init__(self, config):
+    def __init__(self, config, exchange=None):
         self.config = config
         self.logger = TradingLogger(__name__)
+        self._exchange_ref = exchange  # Reference to exchange for getting symbol info
         
         # Risk tracking
         self.daily_trades = []
@@ -75,8 +76,8 @@ class RiskManager:
             risk_assessment["risk_score"] += correlation_risk
             
             # Calculate position size adjustments
-            adjusted_allocation = self._calculate_safe_position_size(
-                allocation_percentage, risk_assessment["risk_score"], available_balance, portfolio_value
+            adjusted_allocation = await self._calculate_safe_position_size(
+                allocation_percentage, risk_assessment["risk_score"], available_balance, portfolio_value, symbol
             )
             
             if adjusted_allocation != allocation_percentage:
@@ -267,9 +268,9 @@ class RiskManager:
         
         return risk_score
     
-    def _calculate_safe_position_size(self, requested_allocation: float, risk_score: float, 
-                                     available_balance: float, portfolio_value: float) -> float:
-        """Calculate safe position size based on risk score."""
+    async def _calculate_safe_position_size(self, requested_allocation: float, risk_score: float, 
+                                           available_balance: float, portfolio_value: float, symbol: str = None) -> float:
+        """Calculate safe position size based on risk score and real Binance minimums."""
         
         # Base allocation adjustment based on risk score
         risk_multiplier = max(0.2, 1.0 - (risk_score * 0.15))  # Reduce by 15% per risk point
@@ -280,12 +281,35 @@ class RiskManager:
         max_allocation_by_balance = (available_balance / portfolio_value) * 100 * 0.9  # 90% of available
         adjusted_allocation = min(adjusted_allocation, max_allocation_by_balance)
         
-        # Ensure minimum trade size
-        min_trade_value = float(self.config.min_trade_amount)
+        # Get real minimum trade value from Binance if symbol provided
+        min_trade_value = float(self.config.min_trade_amount)  # Fallback
+        
+        if symbol and hasattr(self, '_exchange_ref'):
+            try:
+                # Get real Binance minimum for this symbol
+                symbol_info = await self._exchange_ref.get_symbol_info(symbol)
+                min_trade_value = symbol_info.get("min_notional", min_trade_value)
+                self.logger.logger.info(f"Using real Binance minimum ${min_trade_value:.2f} for {symbol}")
+            except Exception:
+                self.logger.logger.warning(f"Could not get Binance minimums for {symbol}, using config default")
+        
         min_allocation = (min_trade_value / portfolio_value) * 100
         
+        # If requested trade is below minimum, try to adjust upward (but within risk limits)
         if adjusted_allocation < min_allocation:
-            return 0.0  # Trade too small, reject
+            max_risk_allocation = float(self.config.max_portfolio_risk) * 100  # Max risk per trade
+            
+            self.logger.logger.info(f"Need {min_allocation:.1f}% allocation (${min_trade_value:.2f}) vs max risk {max_risk_allocation:.1f}%")
+            
+            if min_allocation <= max_risk_allocation:
+                # Increase to minimum if within risk limits
+                adjusted_allocation = min_allocation
+                self.logger.logger.info(f"✅ Increased allocation to {min_allocation:.1f}% to meet Binance minimum ${min_trade_value:.2f}")
+            else:
+                # Try a smaller symbol or reject the trade
+                self.logger.logger.warning(f"❌ {symbol} requires {min_allocation:.1f}% but max risk is {max_risk_allocation:.1f}%")
+                self.logger.logger.info(f"💡 Consider trading a symbol with lower minimum or adding more funds")
+                return 0.0
         
         # Round to reasonable precision
         return round(adjusted_allocation, 2)
